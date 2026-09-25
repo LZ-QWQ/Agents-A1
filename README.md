@@ -432,7 +432,7 @@ For detailed evaluation scripts, task definitions, metrics, and reproduction ins
 
 ### AMD Radeon GPU
 
-Get ready to run Agents-A1/A1.5 on AMD Radeon GPUs. With ROCm, PyTorch, vLLM, and llama.cpp, developers can easily explore and run frontier Agents-A1/A1.5 models on AMD GPUs. Get started with the [installation guide](./docs/rocm-installation.md).
+Get ready to run Agents-A1.5 on AMD Radeon GPUs. With ROCm, PyTorch, vLLM, and llama.cpp, developers can easily explore and run frontier Agents-A1.5 models on AMD GPUs. Get started with the [installation guide](./docs/rocm-installation.md).
 
 ## Citation
 
