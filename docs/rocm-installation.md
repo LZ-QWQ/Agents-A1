@@ -34,7 +34,7 @@ operators, and parameter count as Agents-A1.5.
 |---|---|---|
 | llama.cpp Q4_K_M + 262K context | 22 GB | works, 53 tok/s |
 | llama.cpp Q8_0 + 262K context | 38 GB | works, 40 tok/s; weights are placed in system memory via GTT |
-| vLLM BF16 + 262K context | 70+ GB | needs an allocatable pool of about 82 GiB (74.5 GiB weights + runtime, 5.1 GiB KV for one 262K request); larger pools run the full context, smaller pools get a suggested maximum from vLLM at startup |
+| vLLM BF16 + 262K context | 70+ GB | needs an allocatable pool of about 82 GiB (74.5 GiB weights + runtime, 5.1 GiB KV for one 262K request); verified on a 100 GiB pool (2.63x concurrency, about 22 tok/s), smaller pools get a suggested maximum from vLLM at startup |
 | vLLM FP8 | 38 GB | not supported on Radeon APUs (no FP8 MoE backend); AMD Instinct MI GPUs only |
 
 On AMD APUs the practical limit is total unified memory, not the BIOS VRAM
@@ -57,7 +57,12 @@ docker exec agents-a15-vllm python3 -c \
 A pool of roughly 82 GiB or more runs the full 262K context. Below that,
 either start the server once and read the maximum model length vLLM itself
 suggests (an 80 GiB pool reported about 106K with default flags), then set
-`--max-model-len` accordingly — or raise the pool. AMD's
+`--max-model-len` accordingly — or raise the pool. If startup instead fails
+with `Free memory on device ... is less than desired GPU memory
+utilization`, some of the pool is already in use by the system or other GPU
+processes (measured: a freshly booted 100 GiB pool exposed 91.08 GiB free,
+just below the default 0.92 target of 92.0 GiB); lower
+`--gpu-memory-utilization` slightly, for example to 0.90. AMD's
 [RDNA 3.5 system optimization guide](https://rocm.docs.amd.com/en/latest/reference/system-optimization/rdna3-5.html)
 recommends keeping the BIOS VRAM reservation small (for example 0.5 GB) and
 raising the shared TTM/GTT limit instead: large BIOS reservations bring
@@ -325,8 +330,9 @@ Set `GPU_TARGETS` using the LLVM target name from the
 [AMD GPU hardware specifications](https://rocm.docs.amd.com/en/latest/reference/gpu-specs.html)
 or from `rocminfo | grep gfx`. The example below builds for `gfx950`,
 `gfx1100`, and `gfx1151`; separate multiple targets with semicolons. Building
-for your single GPU target roughly halves the HIP kernel compile time
-(measured: 250 s for three targets versus 81 s for one).
+for your single GPU target cuts the HIP kernel compile time (measured: 250 s
+to build for three targets; reconfiguring to a single target recompiled the
+HIP kernels in 81 s).
 
 ```bash
 HIPCXX="$(hipconfig -l)/clang" HIP_PATH="$(hipconfig -R)" \
