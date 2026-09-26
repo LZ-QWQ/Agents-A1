@@ -7,6 +7,15 @@ The whole flow was verified end to end on a Ryzen AI MAX+ 395 (gfx1151,
 containers used here, including restricted-network conditions; the driver
 and container versions do not need to match.
 
+On AMD Ryzen AI Max (RDNA 3.5) machines the kernel must include the KFD
+fixes for the platform, otherwise GPU compute may fail to initialize or
+behave unpredictably: Ubuntu 24.04 HWE 6.17.0-19.19~24.04.2 or later,
+Ubuntu 24.04 OEM 6.14.0-1018 or later, or 6.18.4 or later on other
+distributions (the verified machine ran 6.17.0-1032-oem). Host ROCm 7.2.x
+is a supported driver for these containers. See AMD's
+[RDNA 3.5 system optimization guide](https://rocm.docs.amd.com/en/latest/reference/system-optimization/rdna3-5.html)
+for the full compatibility matrix.
+
 Find your GPU target name before you start; the build steps below need it:
 
 ```bash
@@ -32,10 +41,12 @@ carve-out: with `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` (vLLM) or
 plain HIP allocation (llama.cpp), weights spill into system memory
 automatically.
 
-More precisely, the budget vLLM can spend is the driver memory pool (on APUs
-this is the GTT limit, measured at 80.0 GiB on a 96 GB-class machine), not
-the total system RAM, and it shrinks further while other GPU processes are
-running. Check your pool before downloading the BF16 weights:
+More precisely, the budget vLLM can spend is the driver memory pool (the
+GTT limit on APUs), not the total system RAM, and it shrinks further while
+other GPU processes are running. The GTT limit defaults to roughly half of
+system RAM (about 47 GiB on a 96 GB-class machine); the verified machine had
+it raised to 80 GiB through TTM configuration. Check your pool before
+downloading the BF16 weights:
 
 ```bash
 docker exec agents-a15-vllm python3 -c \
@@ -43,9 +54,19 @@ docker exec agents-a15-vllm python3 -c \
 ```
 
 A pool of roughly 82 GiB or more runs the full 262K context. Below that,
-start the server once and read the maximum model length vLLM itself suggests
-(an 80 GiB pool reported about 106K with default flags), then set
-`--max-model-len` accordingly.
+either start the server once and read the maximum model length vLLM itself
+suggests (an 80 GiB pool reported about 106K with default flags), then set
+`--max-model-len` accordingly — or raise the pool. AMD's
+[RDNA 3.5 system optimization guide](https://rocm.docs.amd.com/en/latest/reference/system-optimization/rdna3-5.html)
+recommends keeping the BIOS VRAM reservation small (for example 0.5 GB) and
+raising the shared TTM/GTT limit instead: large BIOS reservations bring
+little benefit because weights already spill into GTT automatically
+(measured while serving Q8_0: 1.1 GiB of VRAM in use, 41.8 GiB of GTT).
+Raise the limit with the `amd-ttm` helper (`pipx install amd-debug-tools`,
+then `amd-ttm --set <GB>`) or by writing `options ttm pages_limit=<pages>`
+to `/etc/modprobe.d/ttm.conf`; a reboot is required. On a 96 GB-class
+machine, an 88 GiB pool fits the full BF16 + 262K setup with room for
+about 2x concurrency.
 
 ## Download the model
 
@@ -167,11 +188,11 @@ vllm serve InternScience/Agents-A1.5 \
   --tool-call-parser qwen3_coder
 ```
 
-On APUs whose driver memory pool is below about 82 GiB (a 96 GB-class
-machine measured 80.0 GiB), this full BF16 setup does not fit; lower
-`--max-model-len` to the maximum vLLM suggests at startup (about 106K on
-that machine), or use the llama.cpp path with the Q8_0 or Q4_K_M GGUF
-(see "Choosing a configuration").
+On APUs whose driver memory pool is below about 82 GiB (the verified
+96 GB-class machine exposed 80.0 GiB), this full BF16 setup does not fit.
+Raise the GTT limit as described in "Choosing a configuration" (an 88 GiB
+pool fits this setup), lower `--max-model-len` to the maximum vLLM suggests
+at startup, or use the llama.cpp path with the Q8_0 or Q4_K_M GGUF.
 
 #### AMD Instinct MI GPUs
 
