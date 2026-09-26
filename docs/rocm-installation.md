@@ -20,14 +20,28 @@ operators, and parameter count as Agents-A1.5.
 |---|---|---|
 | llama.cpp Q4_K_M + 262K context | 22 GB | works, 53 tok/s |
 | llama.cpp Q8_0 + 262K context | 38 GB | works, 40 tok/s; weights are placed in system memory via GTT |
-| vLLM BF16 + 262K context | 70+ GB | needs well over 130 GB of unified memory; on 96 GB the reachable context ceiling is about 100K |
+| vLLM BF16 + 262K context | 70+ GB | needs an allocatable pool of about 82 GiB (74.5 GiB weights + runtime, 5.1 GiB KV for one 262K request); larger pools run the full context, smaller pools get a suggested maximum from vLLM at startup |
 | vLLM FP8 | 38 GB | not supported on Radeon APUs (no FP8 MoE backend); AMD Instinct MI GPUs only |
 
 On AMD APUs the practical limit is total unified memory, not the BIOS VRAM
 carve-out: with `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` (vLLM) or
 plain HIP allocation (llama.cpp), weights spill into system memory
-automatically. If vLLM reports `No available memory for the cache blocks` or
-suggests a maximum model length, lower `--max-model-len` accordingly.
+automatically.
+
+More precisely, the budget vLLM can spend is the driver memory pool (on APUs
+this is the GTT limit, measured at 80.0 GiB on a 96 GB-class machine), not
+the total system RAM, and it shrinks further while other GPU processes are
+running. Check your pool before downloading the BF16 weights:
+
+```bash
+docker exec agents-a15-vllm python3 -c \
+  "import torch; print(round(torch.cuda.get_device_properties(0).total_memory/2**30,1), 'GiB')"
+```
+
+A pool of roughly 82 GiB or more runs the full 262K context. Below that,
+start the server once and read the maximum model length vLLM itself suggests
+(an 80 GiB pool reported about 106K with default flags), then set
+`--max-model-len` accordingly.
 
 ## Download the model
 
@@ -148,9 +162,11 @@ vllm serve InternScience/Agents-A1.5 \
   --tool-call-parser qwen3_coder
 ```
 
-On APUs with about 96 GB of unified memory this full BF16 setup does not fit;
-lower `--max-model-len` to roughly 100000 or less, or use the llama.cpp path
-with the Q8_0 or Q4_K_M GGUF (see "Choosing a configuration").
+On APUs whose driver memory pool is below about 82 GiB (a 96 GB-class
+machine measured 80.0 GiB), this full BF16 setup does not fit; lower
+`--max-model-len` to the maximum vLLM suggests at startup (about 106K on
+that machine), or use the llama.cpp path with the Q8_0 or Q4_K_M GGUF
+(see "Choosing a configuration").
 
 #### AMD Instinct MI GPUs
 
