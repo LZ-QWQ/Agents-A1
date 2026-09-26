@@ -4,8 +4,9 @@ This guide deploys the full multimodal Agents-A1.5 model on AMD GPUs using
 vLLM or llama.cpp. A compatible AMD GPU driver and Docker are required.
 The whole flow was verified end to end on a Ryzen AI MAX+ 395 (gfx1151,
 96 GB-class unified memory) with a host ROCm 7.2 driver and the ROCm 10.0
-containers used here, including restricted-network conditions; the driver
-and container versions do not need to match.
+containers used here, including restricted-network conditions and the full
+BF16 + 262K configuration (after raising the GTT pool to 100 GiB as
+described below); the driver and container versions do not need to match.
 
 On AMD Ryzen AI Max (RDNA 3.5) machines the kernel must include the KFD
 fixes for the platform, otherwise GPU compute may fail to initialize or
@@ -65,8 +66,8 @@ little benefit because weights already spill into GTT automatically
 Raise the limit with the `amd-ttm` helper (`pipx install amd-debug-tools`,
 then `amd-ttm --set <GB>`) or by writing `options ttm pages_limit=<pages>`
 to `/etc/modprobe.d/ttm.conf`; a reboot is required. On a 96 GB-class
-machine, an 88 GiB pool fits the full BF16 + 262K setup with room for
-about 2x concurrency.
+machine, a 100 GiB pool was verified to run the full BF16 + 262K setup with
+2.63x concurrency at about 22 tok/s.
 
 ## Download the model
 
@@ -189,10 +190,12 @@ vllm serve InternScience/Agents-A1.5 \
 ```
 
 On APUs whose driver memory pool is below about 82 GiB (the verified
-96 GB-class machine exposed 80.0 GiB), this full BF16 setup does not fit.
-Raise the GTT limit as described in "Choosing a configuration" (an 88 GiB
-pool fits this setup), lower `--max-model-len` to the maximum vLLM suggests
-at startup, or use the llama.cpp path with the Q8_0 or Q4_K_M GGUF.
+96 GB-class machine exposed 80.0 GiB before its GTT limit was raised), this
+full BF16 setup does not fit. Raise the GTT limit as described in
+"Choosing a configuration" — after raising it to 100 GiB, the full
+BF16 + 262K setup ran on that machine with 2.63x concurrency and about
+22 tok/s — or lower `--max-model-len` to the maximum vLLM suggests at
+startup, or use the llama.cpp path with the Q8_0 or Q4_K_M GGUF.
 
 #### AMD Instinct MI GPUs
 
