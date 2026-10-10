@@ -1,21 +1,9 @@
 # Run Agents-A1.5 on AMD ROCm
 
 This guide deploys the full multimodal Agents-A1.5 model on AMD GPUs using
-vLLM or llama.cpp. A compatible AMD GPU driver and Docker are required.
-The whole flow was verified end to end on a Ryzen AI MAX+ 395 (gfx1151,
-96 GB-class unified memory) with a host ROCm 7.2 driver and the ROCm 10.0
-containers used here, including restricted-network conditions and the full
-BF16 + 262K configuration (after raising the GTT pool to 100 GiB as
-described below); the driver and container versions do not need to match.
-
-On AMD Ryzen AI Max (RDNA 3.5) machines the kernel must include the KFD
-fixes for the platform, otherwise GPU compute may fail to initialize or
-behave unpredictably: Ubuntu 24.04 HWE 6.17.0-19.19~24.04.2 or later,
-Ubuntu 24.04 OEM 6.14.0-1018 or later, or 6.18.4 or later on other
-distributions (the verified machine ran 6.17.0-1032-oem). Host ROCm 7.2.x
-is a supported driver for these containers. See AMD's
-[RDNA 3.5 system optimization guide](https://rocm.docs.amd.com/en/latest/reference/system-optimization/rdna3-5.html)
-for the full compatibility matrix.
+vLLM or llama.cpp. A compatible AMD GPU driver and Docker are required. See the
+[ROCm compatibility matrix](https://rocm.docs.amd.com/en/docs-10.0.0/compatibility/compatibility-matrix.html)
+for supported driver and ROCm combinations.
 
 Find your GPU target name before you start; the build steps below need it:
 
@@ -25,92 +13,78 @@ rocminfo | grep gfx
 
 ## Choosing a configuration
 
-Weights range from 38 GB (Q8_0 GGUF) to over 70 GB (BF16), and not every
-variant runs on every GPU, so pick a configuration before downloading. The
-numbers below were measured on Agents-A1, which has the same architecture,
-operators, and parameter count as Agents-A1.5.
+The table below provides reference configurations and benchmark results
+for Agents-A1 to help you choose a setup that fits your hardware and available
+memory. Agents-A1 has the same architecture, operators, and parameter count
+as Agents-A1.5.
 
-| Setup | Weights | Measured on a 96 GB-class APU (gfx1151) |
-|---|---|---|
-| llama.cpp Q4_K_M + 262K context | 22 GB | works, 53 tok/s |
-| llama.cpp Q8_0 + 262K context | 38 GB | works, 40 tok/s; weights are placed in system memory via GTT |
-| vLLM BF16 + 262K context | 70+ GB | needs an allocatable pool of about 82 GiB (74.5 GiB weights + runtime, 5.1 GiB KV for one 262K request); verified on a 100 GiB pool (2.63x concurrency, about 22 tok/s), smaller pools get a suggested maximum from vLLM at startup |
-| vLLM FP8 | 38 GB | not supported on Radeon APUs (no FP8 MoE backend); AMD Instinct MI GPUs only |
+Reference text-only throughput is reported in tok/s.
 
-On AMD APUs the practical limit is total unified memory, not the BIOS VRAM
-carve-out: with `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` (vLLM) or
-plain HIP allocation (llama.cpp), weights spill into system memory
-automatically.
+| Configuration | Model and weight size | AMD Radeon Pro W7900D (48 GB, gfx1100) | AMD Radeon AI PRO R9700 (32 GB, gfx1201) | AMD Ryzen AI Max+ PRO 395 (128 GB unified memory, gfx1151) | AMD Instinct MI355X (288 GB, gfx950) |
+|---|---|---|---|---|---|
+| llama.cpp Q4_K_M + 262K context | [InternScience/Agents-A1-Q4_K_M-GGUF](https://huggingface.co/InternScience/Agents-A1-Q4_K_M-GGUF/tree/main) — 22.1 GB | 100.22 | 99.23 | 26.00 | 171.83 |
+| llama.cpp Q8_0 + 262K context | [InternScience/Agents-A1-Q8_0-GGUF](https://huggingface.co/InternScience/Agents-A1-Q8_0-GGUF/tree/main) — 37.8 GB | 80.50 | 82.55† | 32.85 | 166.32 |
+| vLLM BF16 + 262K context | [InternScience/Agents-A1](https://huggingface.co/InternScience/Agents-A1/tree/main) — 70.2 GB | 194.03* | 340.89* | 45.21 | 601.47 |
+| vLLM FP8 + 262K context | [InternScience/Agents-A1-FP8](https://huggingface.co/InternScience/Agents-A1-FP8/tree/main) — 37.7 GB | FP8 not supported | 163.25* | FP8 not supported | 538.42‡ |
 
-More precisely, the budget vLLM can spend is the driver memory pool (the
-GTT limit on APUs), not the total system RAM, and it shrinks further while
-other GPU processes are running. The GTT limit defaults to roughly half of
-system RAM (about 47 GiB on a 96 GB-class machine); the verified machine had
-it raised to 80 GiB through TTM configuration. Check your pool before
-downloading the BF16 weights:
+\* Uses four GPUs; † uses two GPUs; all other results use one GPU.
 
-```bash
-docker exec agents-a15-vllm python3 -c \
-  "import torch; print(round(torch.cuda.get_device_properties(0).total_memory/2**30,1), 'GiB')"
-```
+‡ For MI355X FP8 with AITER enabled (`VLLM_ROCM_USE_AITER=1`), add `--compilation-config '{"pass_config":{"fuse_norm_quant":false}}'` to the `vllm serve` command as a workaround for a potential numerical accuracy issue with this image.
 
-A pool of roughly 82 GiB or more runs the full 262K context. Below that,
-either start the server once and read the maximum model length vLLM itself
-suggests (an 80 GiB pool reported about 106K with default flags), then set
-`--max-model-len` accordingly — or raise the pool. If startup instead fails
-with `Free memory on device ... is less than desired GPU memory
-utilization`, some of the pool is already in use by the system or other GPU
-processes (measured: a freshly booted 100 GiB pool exposed 91.08 GiB free,
-just below the default 0.92 target of 92.0 GiB); lower
-`--gpu-memory-utilization` slightly, for example to 0.90. AMD's
-[RDNA 3.5 system optimization guide](https://rocm.docs.amd.com/en/latest/reference/system-optimization/rdna3-5.html)
-recommends keeping the BIOS VRAM reservation small (for example 0.5 GB) and
-raising the shared TTM/GTT limit instead: large BIOS reservations bring
-little benefit because weights already spill into GTT automatically
-(measured while serving Q8_0: 1.1 GiB of VRAM in use, 41.8 GiB of GTT).
-Raise the limit with the `amd-ttm` helper (`pipx install amd-debug-tools`,
-then `amd-ttm --set <GB>`) or by writing `options ttm pages_limit=<pages>`
-to `/etc/modprobe.d/ttm.conf`; a reboot is required. On a 96 GB-class
-machine, a 100 GiB pool was verified to run the full BF16 + 262K setup with
-2.63x concurrency at about 22 tok/s.
+<details>
+<summary>Benchmark commands</summary>
 
-## Download the model
+Run these benchmarks in the respective containers, using Agents-A1 in the
+server commands below. The examples use BF16 and Q8_0; change the model
+identifiers for other configurations.
 
-The examples in this guide download weights automatically from Hugging Face
-on first start. The BF16 weights are over 70 GB, so the first start may take
-an hour or more depending on your connection.
-
-In regions where huggingface.co is slow or unreachable, download from
-ModelScope on the host instead and mount the files into the container. This
-route is fast, integrity-checked (sha256 against the ModelScope manifest),
-and survives container removal (measured: about 70 GB in one hour with
-eight parallel workers, with all file hashes verified):
+**vLLM:** Start the corresponding model with the hardware-specific command
+below, then run in another shell. Use `Output token throughput (tok/s)`.
 
 ```bash
-pip install modelscope
-
-# vLLM path: BF16 weights (70+ GB)
-modelscope download --model InternScience/Agents-A1.5 \
-  --local-dir ./Agents-A1.5 --max-workers 8
-
-# llama.cpp path: Q8_0 GGUF (38 GB, includes the multimodal projector)
-modelscope download --model InternScience/Agents-A1.5-Q8_0-GGUF \
-  --local-dir ./Agents-A1.5-Q8_0-GGUF --max-workers 8
+vllm bench serve \
+  --model InternScience/Agents-A1 \
+  --host 127.0.0.1 --port 8000 \
+  --dataset-name random \
+  --random-input-len 128 \
+  --random-output-len 512 \
+  --num-prompts 32 \
+  --max-concurrency 4 \
+  --num-warmups 3
 ```
 
-Then add a volume mount to the `docker run` commands in this guide and point
-the server at the local path instead of the repository id:
+**llama.cpp:** Use the `tg512` row's `t/s` value.
 
-- vLLM: add `-v $PWD/Agents-A1.5:/model:ro` and serve with `--model /model`.
-- llama.cpp: add `-v $PWD/Agents-A1.5-Q8_0-GGUF:/models:ro` and start
-  `llama-server` with `--model /models/Agents-A1.5-Q8_0.gguf --mmproj
-  /models/Agents-A1.5-mmproj.gguf` instead of `--hf-repo`.
+```bash
+HIP_VISIBLE_DEVICES=0 \
+llama-bench \
+  --hf-repo InternScience/Agents-A1-Q8_0-GGUF:Q8_0 \
+  -p 128 -n 512 \
+  -r 5
+```
 
-A Hugging Face mirror also works without pre-downloading: set
-`HF_ENDPOINT=https://hf-mirror.com` in the server environment (both vLLM and
-llama.cpp honor it). Note that llama.cpp's built-in downloader does not verify
-file hashes; on unstable connections, verify the downloaded GGUF before
-reporting load errors.
+For R9700 Q8_0, use `HIP_VISIBLE_DEVICES=0,1` and add `--split-mode layer`.
+
+</details>
+
+> [!NOTE]
+> **AMD Ryzen AI Max (RDNA 3.5) memory configuration**
+>
+> On AMD Ryzen AI Max (RDNA 3.5) systems, ensure sufficient GPU-accessible
+> memory for the model and context size. See AMD's
+> [system optimization guide](https://rocm.docs.amd.com/en/latest/reference/system-optimization/rdna3-5.html)
+> for kernel requirements and memory configuration instructions.
+>
+> Both configurations below have been tested on an AMD Ryzen AI Max+ PRO 395
+> system. Choose the option and memory allocation that suit your system:
+>
+> - Reserve sufficient VRAM in the BIOS, for example 96 GB.
+> - Use a small BIOS VRAM reservation, for example 0.5 GB, and increase the
+>   GTT limit sufficiently, for example to 100 GB.
+>
+> Neither configuration requires setting llama.cpp's
+> [`GGML_CUDA_ENABLE_UNIFIED_MEMORY`](https://github.com/ggml-org/llama.cpp/blob/master/docs/build.md#unified-memory-2)
+> environment variable.
 
 ## vLLM
 
@@ -119,6 +93,19 @@ reporting load errors.
 ```bash
 docker pull rocm/vllm:rocm10.0.0_ubuntu24.04_py3.14_pytorch_2.12.0_vllm_0.27.0
 ```
+
+> [!NOTE]
+> **Docker Hub mirror**
+>
+> If Docker Hub is inaccessible, pull through the
+> [DaoCloud mirror](https://github.com/DaoCloud/public-image-mirror)
+> and retag the image:
+>
+> ```bash
+> docker pull m.daocloud.io/docker.io/rocm/vllm:rocm10.0.0_ubuntu24.04_py3.14_pytorch_2.12.0_vllm_0.27.0
+> docker tag m.daocloud.io/docker.io/rocm/vllm:rocm10.0.0_ubuntu24.04_py3.14_pytorch_2.12.0_vllm_0.27.0 \
+>   rocm/vllm:rocm10.0.0_ubuntu24.04_py3.14_pytorch_2.12.0_vllm_0.27.0
+> ```
 
 ### Start and enter the container
 
@@ -142,15 +129,54 @@ Enter the container:
 docker exec -it agents-a15-vllm bash
 ```
 
-If a container with the same name already exists, remove it first with
-`docker rm agents-a15-vllm` or add `--rm` to `docker run`.
+### Pre-download the model
+
+Use the [Hugging Face CLI](https://huggingface.co/docs/huggingface_hub/guides/cli)
+to pre-download the model. See the linked documentation for installation and
+usage.
+
+```bash
+hf download InternScience/Agents-A1.5
+```
+
+> [!NOTE]
+> **Hugging Face mirror for restricted networks**
+>
+> To use [HF-Mirror](https://hf-mirror.com/), set the endpoint before
+> running `hf download` above and `vllm serve` below, in the same shell:
+>
+> ```bash
+> export HF_ENDPOINT=https://hf-mirror.com
+> ```
+>
+> If `hf download` fails, you can try
+> [`export HF_HUB_DISABLE_XET=1`](https://huggingface.co/docs/huggingface_hub/package_reference/environment_variables#hfhubdisablexet)
+> before retrying.
+
+> [!NOTE]
+> **ModelScope for networks with limited Hugging Face access**
+>
+> Use ModelScope 1.37.1 with this image when setting `VLLM_USE_MODELSCOPE=True`.
+> See [PR #52431](https://github.com/vllm-project/vllm/pull/52431) and
+> [PR #55300](https://github.com/vllm-project/vllm/pull/55300)
+> for compatibility issues with newer ModelScope SDK versions.
+> Pre-download with the
+> [ModelScope CLI](https://www.modelscope.cn/docs/models/download):
+>
+> ```bash
+> python3 -m pip install modelscope==1.37.1
+> modelscope download --model InternScience/Agents-A1.5
+> ```
+>
+> Before running `vllm serve`, enable vLLM's
+> [ModelScope integration](https://www.modelscope.cn/docs/ecosystem-integrations/model-download/vllm)
+> in the same shell:
+>
+> ```bash
+> export VLLM_USE_MODELSCOPE=True
+> ```
 
 ### Start the model server
-
-The first start downloads the model and may take some time. Expect roughly
-five minutes of cold start for weight loading and memory profiling, and about
-one additional minute for the first multimodal request (one-time Triton
-kernel compilation); subsequent requests are fast.
 
 Choose one of the following commands for your hardware.
 If you are unsure which category applies to your GPU, see the
@@ -158,9 +184,8 @@ If you are unsure which category applies to your GPU, see the
 
 #### AMD Radeon GPUs
 
-The BF16 weights are over 70 GB and do not fit on one Radeon GPU, so this
-example uses four GPUs. Enable Triton FlashAttention for the multimodal vision
-encoder:
+This example uses four GPUs to accommodate the large BF16 model.
+Enable Triton FlashAttention for the multimodal vision encoder:
 
 ```bash
 FLASH_ATTENTION_TRITON_AMD_ENABLE=TRUE \
@@ -194,14 +219,6 @@ vllm serve InternScience/Agents-A1.5 \
   --tool-call-parser qwen3_coder
 ```
 
-On APUs whose driver memory pool is below about 82 GiB (the verified
-96 GB-class machine exposed 80.0 GiB before its GTT limit was raised), this
-full BF16 setup does not fit. Raise the GTT limit as described in
-"Choosing a configuration" — after raising it to 100 GiB, the full
-BF16 + 262K setup ran on that machine with 2.63x concurrency and about
-22 tok/s — or lower `--max-model-len` to the maximum vLLM suggests at
-startup, or use the llama.cpp path with the Q8_0 or Q4_K_M GGUF.
-
 #### AMD Instinct MI GPUs
 
 Enable [AITER](https://github.com/ROCm/aiter)-optimized ROCm kernels:
@@ -231,13 +248,7 @@ curl http://127.0.0.1:8000/v1/chat/completions \
   }'
 ```
 
-Agents-A1.5 is a thinking model: replies arrive in the `reasoning` field
-first and `content` fills in after thinking completes, so set `max_tokens`
-generously when testing. For best generation quality use
-`temperature=0.85, top_p=0.95, top_k=20, presence_penalty=1.1`.
-
-Send a multimodal request using a public image from the Hugging Face
-documentation dataset:
+Send a multimodal request using a public image from Hugging Face:
 
 ```bash
 curl http://127.0.0.1:8000/v1/chat/completions \
@@ -254,24 +265,15 @@ curl http://127.0.0.1:8000/v1/chat/completions \
   }'
 ```
 
-If that image URL is unreachable from your network, pass the same image as a
-base64 data URI instead (fetch the JPEG from a mirror such as hf-mirror.com
-first and replace `<BASE64>`):
-
-```bash
-curl http://127.0.0.1:8000/v1/chat/completions \
-  -H 'Content-Type: application/json' \
-  --data '{
-    "model": "InternScience/Agents-A1.5",
-    "messages": [{
-      "role": "user",
-      "content": [
-        {"type": "text", "text": "Describe this image."},
-        {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,<BASE64>"}}
-      ]
-    }]
-  }'
-```
+> [!NOTE]
+> **Image URL for restricted networks**
+>
+> If the image URL is inaccessible, replace it with this
+> [HF-Mirror](https://hf-mirror.com/) URL:
+>
+> ```text
+> https://hf-mirror.com/datasets/huggingface/documentation-images/resolve/main/bee.jpg
+> ```
 
 ## llama.cpp
 
@@ -280,6 +282,19 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 ```bash
 docker pull rocm/dev-ubuntu-24.04:10.0.0-full
 ```
+
+> [!NOTE]
+> **Docker Hub mirror**
+>
+> If Docker Hub is inaccessible, pull through the
+> [DaoCloud mirror](https://github.com/DaoCloud/public-image-mirror)
+> and retag the image:
+>
+> ```bash
+> docker pull m.daocloud.io/docker.io/rocm/dev-ubuntu-24.04:10.0.0-full
+> docker tag m.daocloud.io/docker.io/rocm/dev-ubuntu-24.04:10.0.0-full \
+>   rocm/dev-ubuntu-24.04:10.0.0-full
+> ```
 
 ### Start and enter the container
 
@@ -302,9 +317,6 @@ Enter the container:
 docker exec -it agents-a15-llama bash
 ```
 
-If a container with the same name already exists, remove it first with
-`docker rm agents-a15-llama` or add `--rm` to `docker run`.
-
 ### Install llama.cpp
 
 Install the build dependencies inside the container:
@@ -317,56 +329,108 @@ apt-get install -y --no-install-recommends build-essential ca-certificates cmake
 Download the source:
 
 ```bash
-git clone https://github.com/ggml-org/llama.cpp.git
+git clone --depth 1 https://github.com/ggml-org/llama.cpp.git
 cd llama.cpp
 ```
 
-If the clone fails inside the container, download the source tarball on the
-host and copy it in (see "Appendix: restricted networks").
+> [!NOTE]
+> **GitHub proxy for restricted networks**
+>
+> If GitHub is inaccessible, use the third-party
+> [GH-Proxy](https://gh-proxy.com/)
+> instead of the clone command above:
+>
+> ```bash
+> git clone --depth 1 https://gh-proxy.org/https://github.com/ggml-org/llama.cpp.git
+> cd llama.cpp
+> ```
 
 Build and install llama.cpp with HIP support:
 
 Set `GPU_TARGETS` using the LLVM target name from the
 [AMD GPU hardware specifications](https://rocm.docs.amd.com/en/latest/reference/gpu-specs.html)
-or from `rocminfo | grep gfx`. The example below builds for `gfx950`,
-`gfx1100`, and `gfx1151`; separate multiple targets with semicolons. Building
-for your single GPU target cuts the HIP kernel compile time (measured: 250 s
-to build for three targets; reconfiguring to a single target recompiled the
-HIP kernels in 81 s).
+or from `rocminfo | grep gfx`. Specify only the targets you need;
+separate multiple targets with semicolons. The example below builds for
+`gfx950`, `gfx1100`, `gfx1151`, and `gfx1201`.
 
 ```bash
 HIPCXX="$(hipconfig -l)/clang" HIP_PATH="$(hipconfig -R)" \
 cmake -S . -B build \
   -DGGML_HIP=ON \
-  -DGPU_TARGETS="gfx950;gfx1100;gfx1151" \
+  -DGPU_TARGETS="gfx950;gfx1100;gfx1151;gfx1201" \
   -DCMAKE_BUILD_TYPE=Release
 
 cmake --build build --parallel
 cmake --install build
-ldconfig
 ```
 
-After installation, make the ROCm libraries visible system-wide once so that
-every `llama-*` tool starts without extra environment variables:
+After installation, register the ROCm library directory with the system
+dynamic linker:
 
 ```bash
 echo /opt/rocm/lib > /etc/ld.so.conf.d/rocm.conf && ldconfig
 ```
 
-### Start the model server
+### Pre-download the model
 
-The first start downloads the model and its multimodal projector and may take
-some time. Once the files are local, loading is fast: a 38 GB Q8_0 model
-mounts and starts listening in about ten seconds.
+Use the [Hugging Face CLI](https://huggingface.co/docs/huggingface_hub/guides/cli)
+to pre-download the model. See the linked documentation for installation and
+usage.
+
+```bash
+hf download InternScience/Agents-A1.5-Q8_0-GGUF
+```
+
+> [!NOTE]
+> **Hugging Face mirror for restricted networks**
+>
+> To use [HF-Mirror](https://hf-mirror.com/), set the endpoint before
+> running `hf download` above and `llama-server` below, in the same shell:
+>
+> ```bash
+> export HF_ENDPOINT=https://hf-mirror.com
+> ```
+>
+> If `hf download` fails, you can try
+> [`export HF_HUB_DISABLE_XET=1`](https://huggingface.co/docs/huggingface_hub/package_reference/environment_variables#hfhubdisablexet)
+> before retrying.
+
+> [!NOTE]
+> **ModelScope for networks with limited Hugging Face access**
+>
+> Use the [ModelScope CLI](https://www.modelscope.cn/docs/models/download)
+> to download the files into a local directory. See the linked documentation
+> for installation and usage:
+>
+> ```bash
+> modelscope download --model InternScience/Agents-A1.5-Q8_0-GGUF \
+>   --local-dir /models/Agents-A1.5-Q8_0-GGUF
+> ```
+>
+> In the server commands below, replace `--hf-repo` with local model and
+> projector paths, for example:
+>
+> ```bash
+> llama-server \
+>   --model /models/Agents-A1.5-Q8_0-GGUF/Agents-A1.5-Q8_0.gguf \
+>   --mmproj /models/Agents-A1.5-Q8_0-GGUF/Agents-A1.5-mmproj.gguf
+> ```
+>
+> For integration details and updates, see the
+> [ModelScope guide](https://www.modelscope.cn/docs/ecosystem-integrations/model-download/llama-cpp),
+> [issue #1658](https://github.com/modelscope/modelscope/issues/1658), and
+> [PR #24716](https://github.com/ggml-org/llama.cpp/pull/24716).
+> Native `--ms-repo` support is not yet merged.
+
+### Start the model server
 
 Start the server inside the container. `HIP_VISIBLE_DEVICES=0` selects GPU 0
 for this single-GPU example:
 
 ```bash
-LD_LIBRARY_PATH=/opt/rocm/lib \
 HIP_VISIBLE_DEVICES=0 \
 llama-server \
-  --hf-repo InternScience/Agents-A1.5-Q8_0-GGUF \
+  --hf-repo InternScience/Agents-A1.5-Q8_0-GGUF:Q8_0 \
   --alias Agents-A1.5-Q8_0 \
   --host 0.0.0.0 \
   --port 8080 \
@@ -374,11 +438,20 @@ llama-server \
   --n-gpu-layers all
 ```
 
-`--hf-repo` also downloads the multimodal projector automatically when the
-repository provides one. On APUs, `--image-min-tokens 1024` is recommended
-for grounding accuracy with this model family. If you pre-downloaded the GGUF
-from ModelScope, mount it as described in "Download the model" and pass
-`--model` and `--mmproj` instead of `--hf-repo`.
+On Radeon AI PRO R9700, Q8_0 may not fit on one GPU. Use two GPUs with
+layer splitting:
+
+```bash
+HIP_VISIBLE_DEVICES=0,1 \
+llama-server \
+  --hf-repo InternScience/Agents-A1.5-Q8_0-GGUF:Q8_0 \
+  --alias Agents-A1.5-Q8_0 \
+  --host 0.0.0.0 \
+  --port 8080 \
+  --ctx-size 262144 \
+  --n-gpu-layers all \
+  --split-mode layer
+```
 
 ### Test the OpenAI-compatible API
 
@@ -393,10 +466,6 @@ curl http://127.0.0.1:8080/v1/chat/completions \
     "messages": [{"role": "user", "content": "Introduce yourself."}]
   }'
 ```
-
-Agents-A1.5 is a thinking model: replies arrive in the `reasoning_content`
-field first and `content` fills in after thinking completes, so set
-`max_tokens` generously when testing.
 
 Send a multimodal request:
 
@@ -415,32 +484,12 @@ curl http://127.0.0.1:8080/v1/chat/completions \
   }'
 ```
 
-If that image URL is unreachable from your network, pass the same image as a
-base64 data URI instead, as shown in the vLLM section above.
-
-## Appendix: restricted networks
-
-If `docker pull` from docker.io fails, pull the same images through a registry
-mirror and retag them:
-
-```bash
-docker pull docker.m.daocloud.io/rocm/vllm:rocm10.0.0_ubuntu24.04_py3.14_pytorch_2.12.0_vllm_0.27.0
-docker tag  docker.m.daocloud.io/rocm/vllm:rocm10.0.0_ubuntu24.04_py3.14_pytorch_2.12.0_vllm_0.27.0 \
-            rocm/vllm:rocm10.0.0_ubuntu24.04_py3.14_pytorch_2.12.0_vllm_0.27.0
-```
-
-If `git clone` of llama.cpp fails inside the container, fetch the source
-tarball on the host and copy it in:
-
-```bash
-curl -L -o llama.cpp-master.tar.gz \
-  https://codeload.github.com/ggml-org/llama.cpp/tar.gz/refs/heads/master
-docker cp llama.cpp-master.tar.gz agents-a15-llama:/root/
-docker exec agents-a15-llama bash -c \
-  'cd /root && tar xzf llama.cpp-master.tar.gz && mv llama.cpp-master llama.cpp'
-```
-
-For Hugging Face access set `HF_ENDPOINT=https://hf-mirror.com` in the server
-environment (both vLLM and llama.cpp honor it). If you use the `hf` CLI to
-pre-download, also set `HF_HUB_DISABLE_XET=1`, because the Xet transfer
-protocol does not work through the mirror and fails with 401.
+> [!NOTE]
+> **Image URL for restricted networks**
+>
+> If the image URL is inaccessible, replace it with this
+> [HF-Mirror](https://hf-mirror.com/) URL:
+>
+> ```text
+> https://hf-mirror.com/datasets/huggingface/documentation-images/resolve/main/bee.jpg
+> ```
