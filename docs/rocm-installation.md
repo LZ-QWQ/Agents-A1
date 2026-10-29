@@ -1,6 +1,6 @@
-# Run Agents-A1.5 on AMD ROCm
+# Run Sage-A1.5 on AMD ROCm
 
-This guide deploys the full multimodal Agents-A1.5 model on AMD GPUs using
+This guide deploys the full multimodal Sage-A1.5 model on AMD GPUs using
 vLLM or llama.cpp. A compatible AMD GPU driver and Docker are required. See the
 [ROCm compatibility matrix](https://rocm.docs.amd.com/en/docs-10.0.0/compatibility/compatibility-matrix.html)
 for supported driver and ROCm combinations.
@@ -14,18 +14,17 @@ rocminfo | grep gfx
 ## Choosing a configuration
 
 The table below provides reference configurations and benchmark results
-for Agents-A1 to help you choose a setup that fits your hardware and available
-memory. Agents-A1 has the same architecture, operators, and parameter count
-as Agents-A1.5.
+for Sage-A1.5 to help you choose a setup that fits your hardware and available
+memory.
 
 Reference text-only throughput is reported in tok/s.
 
-| Configuration | Model and weight size | AMD Radeon Pro W7900D (48 GB, gfx1100) | AMD Radeon AI PRO R9700 (32 GB, gfx1201) | AMD Ryzen AI Max+ PRO 395 (128 GB unified memory, gfx1151) | AMD Instinct MI355X (288 GB, gfx950) |
+| Configuration | Model and weight size | AMD Radeon Pro W7900D (48 GB, gfx1100) | AMD Radeon AI PRO R9700 (32 GB, gfx1201) | AMD Ryzen AI Max+ 395 (128 GB unified memory, gfx1151) | AMD Instinct MI355X (288 GB, gfx950) |
 |---|---|---|---|---|---|
-| llama.cpp Q4_K_M + 262K context | [InternScience/Agents-A1-Q4_K_M-GGUF](https://huggingface.co/InternScience/Agents-A1-Q4_K_M-GGUF/tree/main) — 22.1 GB | 100.22 | 99.23 | 26.00 | 171.83 |
-| llama.cpp Q8_0 + 262K context | [InternScience/Agents-A1-Q8_0-GGUF](https://huggingface.co/InternScience/Agents-A1-Q8_0-GGUF/tree/main) — 37.8 GB | 80.50 | 82.55† | 32.85 | 166.32 |
-| vLLM BF16 + 262K context | [InternScience/Agents-A1](https://huggingface.co/InternScience/Agents-A1/tree/main) — 70.2 GB | 194.03* | 340.89* | 45.21 | 601.47 |
-| vLLM FP8 + 262K context | [InternScience/Agents-A1-FP8](https://huggingface.co/InternScience/Agents-A1-FP8/tree/main) — 37.7 GB | FP8 not supported | 163.25* | FP8 not supported | 538.42‡ |
+| llama.cpp Q4_K_M + 262K context | [InternScience/Sage-A1.5-Q4_K_M-GGUF](https://huggingface.co/InternScience/Sage-A1.5-Q4_K_M-GGUF) — 21.71 GB + 0.90 GB projector | 103.94 | 100.36 | 66.12 | 180.44 |
+| llama.cpp Q8_0 + 262K context | [InternScience/Sage-A1.5-Q8_0-GGUF](https://huggingface.co/InternScience/Sage-A1.5-Q8_0-GGUF) — 37.80 GB + 0.90 GB projector | 82.23 | 83.04† | 48.44 | 173.97 |
+| vLLM BF16 + 262K context | [InternScience/Sage-A1.5](https://huggingface.co/InternScience/Sage-A1.5) — 71.91 GB | 194.25* | 193.95* | 60.20 | 582.73 |
+| vLLM FP8 + 262K context | [InternScience/Sage-A1.5-FP8](https://huggingface.co/InternScience/Sage-A1.5-FP8) — 39.37 GB | FP8 backend unavailable | 137.93* | FP8 backend unavailable | 552.87‡ |
 
 \* Uses four GPUs; † uses two GPUs; all other results use one GPU.
 
@@ -34,7 +33,7 @@ Reference text-only throughput is reported in tok/s.
 <details>
 <summary>Benchmark commands</summary>
 
-Run these benchmarks in the respective containers, using Agents-A1 in the
+Run these benchmarks in the respective containers, using Sage-A1.5 in the
 server commands below. The examples use BF16 and Q8_0; change the model
 identifiers for other configurations.
 
@@ -43,7 +42,7 @@ below, then run in another shell. Use `Output token throughput (tok/s)`.
 
 ```bash
 vllm bench serve \
-  --model InternScience/Agents-A1 \
+  --model InternScience/Sage-A1.5 \
   --host 127.0.0.1 --port 8000 \
   --dataset-name random \
   --random-input-len 128 \
@@ -53,12 +52,13 @@ vllm bench serve \
   --num-warmups 3
 ```
 
-**llama.cpp:** Use the `tg512` row's `t/s` value.
+**llama.cpp:** If `llama-server` is running on the same GPU(s), stop it before
+benchmarking. Use the `tg512` row's `t/s` value.
 
 ```bash
 HIP_VISIBLE_DEVICES=0 \
 llama-bench \
-  --hf-repo InternScience/Agents-A1-Q8_0-GGUF:Q8_0 \
+  --hf-repo InternScience/Sage-A1.5-Q8_0-GGUF:Q8_0 \
   -p 128 -n 512 \
   -r 5
 ```
@@ -75,8 +75,8 @@ For R9700 Q8_0, use `HIP_VISIBLE_DEVICES=0,1` and add `--split-mode layer`.
 > [system optimization guide](https://rocm.docs.amd.com/en/latest/reference/system-optimization/rdna3-5.html)
 > for kernel requirements and memory configuration instructions.
 >
-> Both configurations below have been tested on an AMD Ryzen AI Max+ PRO 395
-> system. Choose the option and memory allocation that suit your system:
+> Choose an option and adjust the memory allocation to suit your GPU memory
+> requirements:
 >
 > - Reserve sufficient VRAM in the BIOS, for example 96 GB.
 > - Use a small BIOS VRAM reservation, for example 0.5 GB, and increase the
@@ -112,7 +112,7 @@ docker pull rocm/vllm:rocm10.0.0_ubuntu24.04_py3.14_pytorch_2.12.0_vllm_0.27.0
 Start the container:
 
 ```bash
-docker run --detach --name agents-a15-vllm \
+docker run --detach --name sage-a15-vllm \
   --device /dev/kfd \
   --device /dev/dri \
   --shm-size 64g \
@@ -126,7 +126,7 @@ docker run --detach --name agents-a15-vllm \
 Enter the container:
 
 ```bash
-docker exec -it agents-a15-vllm bash
+docker exec -it sage-a15-vllm bash
 ```
 
 ### Pre-download the model
@@ -136,7 +136,7 @@ to pre-download the model. See the linked documentation for installation and
 usage.
 
 ```bash
-hf download InternScience/Agents-A1.5
+hf download InternScience/Sage-A1.5
 ```
 
 > [!NOTE]
@@ -165,7 +165,7 @@ hf download InternScience/Agents-A1.5
 >
 > ```bash
 > python3 -m pip install modelscope==1.37.1
-> modelscope download --model InternScience/Agents-A1.5
+> modelscope download --model InternScience/Sage-A1.5
 > ```
 >
 > Before running `vllm serve`, enable vLLM's
@@ -189,7 +189,7 @@ Enable Triton FlashAttention for the multimodal vision encoder:
 
 ```bash
 FLASH_ATTENTION_TRITON_AMD_ENABLE=TRUE \
-vllm serve InternScience/Agents-A1.5 \
+vllm serve InternScience/Sage-A1.5 \
   --port 8000 \
   --tensor-parallel-size 4 \
   --max-model-len 262144 \
@@ -209,7 +209,7 @@ errors. Enable Triton FlashAttention for the multimodal vision encoder:
 ```bash
 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
 FLASH_ATTENTION_TRITON_AMD_ENABLE=TRUE \
-vllm serve InternScience/Agents-A1.5 \
+vllm serve InternScience/Sage-A1.5 \
   --port 8000 \
   --tensor-parallel-size 1 \
   --max-model-len 262144 \
@@ -225,7 +225,7 @@ Enable [AITER](https://github.com/ROCm/aiter)-optimized ROCm kernels:
 
 ```bash
 VLLM_ROCM_USE_AITER=1 \
-vllm serve InternScience/Agents-A1.5 \
+vllm serve InternScience/Sage-A1.5 \
   --port 8000 \
   --tensor-parallel-size 1 \
   --max-model-len 262144 \
@@ -243,7 +243,7 @@ request:
 curl http://127.0.0.1:8000/v1/chat/completions \
   -H 'Content-Type: application/json' \
   --data '{
-    "model": "InternScience/Agents-A1.5",
+    "model": "InternScience/Sage-A1.5",
     "messages": [{"role": "user", "content": "Introduce yourself."}]
   }'
 ```
@@ -254,7 +254,7 @@ Send a multimodal request using a public image from Hugging Face:
 curl http://127.0.0.1:8000/v1/chat/completions \
   -H 'Content-Type: application/json' \
   --data '{
-    "model": "InternScience/Agents-A1.5",
+    "model": "InternScience/Sage-A1.5",
     "messages": [{
       "role": "user",
       "content": [
@@ -301,7 +301,7 @@ docker pull rocm/dev-ubuntu-24.04:10.0.0-full
 Start the container:
 
 ```bash
-docker run --detach --name agents-a15-llama \
+docker run --detach --name sage-a15-llama \
   --device /dev/kfd \
   --device /dev/dri \
   --publish 127.0.0.1:8080:8080 \
@@ -314,7 +314,7 @@ docker run --detach --name agents-a15-llama \
 Enter the container:
 
 ```bash
-docker exec -it agents-a15-llama bash
+docker exec -it sage-a15-llama bash
 ```
 
 ### Install llama.cpp
@@ -378,7 +378,7 @@ to pre-download the model. See the linked documentation for installation and
 usage.
 
 ```bash
-hf download InternScience/Agents-A1.5-Q8_0-GGUF
+hf download InternScience/Sage-A1.5-Q8_0-GGUF
 ```
 
 > [!NOTE]
@@ -403,8 +403,8 @@ hf download InternScience/Agents-A1.5-Q8_0-GGUF
 > for installation and usage:
 >
 > ```bash
-> modelscope download --model InternScience/Agents-A1.5-Q8_0-GGUF \
->   --local-dir /models/Agents-A1.5-Q8_0-GGUF
+> modelscope download --model InternScience/Sage-A1.5-Q8_0-GGUF \
+>   --local-dir /models/Sage-A1.5-Q8_0-GGUF
 > ```
 >
 > In the server commands below, replace `--hf-repo` with local model and
@@ -412,8 +412,9 @@ hf download InternScience/Agents-A1.5-Q8_0-GGUF
 >
 > ```bash
 > llama-server \
->   --model /models/Agents-A1.5-Q8_0-GGUF/Agents-A1.5-Q8_0.gguf \
->   --mmproj /models/Agents-A1.5-Q8_0-GGUF/Agents-A1.5-mmproj.gguf
+>   --model /models/Sage-A1.5-Q8_0-GGUF/Sage-A1.5-Q8_0.gguf \
+>   --mmproj /models/Sage-A1.5-Q8_0-GGUF/Sage-A1.5-mmproj.gguf \
+>   --alias Sage-A1.5-Q8_0
 > ```
 >
 > For integration details and updates, see the
@@ -430,8 +431,8 @@ for this single-GPU example:
 ```bash
 HIP_VISIBLE_DEVICES=0 \
 llama-server \
-  --hf-repo InternScience/Agents-A1.5-Q8_0-GGUF:Q8_0 \
-  --alias Agents-A1.5-Q8_0 \
+  --hf-repo InternScience/Sage-A1.5-Q8_0-GGUF:Q8_0 \
+  --alias Sage-A1.5-Q8_0 \
   --host 0.0.0.0 \
   --port 8080 \
   --ctx-size 262144 \
@@ -444,8 +445,8 @@ layer splitting:
 ```bash
 HIP_VISIBLE_DEVICES=0,1 \
 llama-server \
-  --hf-repo InternScience/Agents-A1.5-Q8_0-GGUF:Q8_0 \
-  --alias Agents-A1.5-Q8_0 \
+  --hf-repo InternScience/Sage-A1.5-Q8_0-GGUF:Q8_0 \
+  --alias Sage-A1.5-Q8_0 \
   --host 0.0.0.0 \
   --port 8080 \
   --ctx-size 262144 \
@@ -462,7 +463,7 @@ text request:
 curl http://127.0.0.1:8080/v1/chat/completions \
   -H 'Content-Type: application/json' \
   --data '{
-    "model": "Agents-A1.5-Q8_0",
+    "model": "Sage-A1.5-Q8_0",
     "messages": [{"role": "user", "content": "Introduce yourself."}]
   }'
 ```
@@ -473,7 +474,7 @@ Send a multimodal request:
 curl http://127.0.0.1:8080/v1/chat/completions \
   -H 'Content-Type: application/json' \
   --data '{
-    "model": "Agents-A1.5-Q8_0",
+    "model": "Sage-A1.5-Q8_0",
     "messages": [{
       "role": "user",
       "content": [
